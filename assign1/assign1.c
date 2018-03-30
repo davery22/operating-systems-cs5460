@@ -236,7 +236,7 @@ void convert (enum format_t mode, unsigned long value)
             mask = 0x1; shift = 1;
             break;
         case OCT:
-            mask = 0x3; shift = 2;
+            mask = 0x7; shift = 3;
             break;
         case HEX:
             mask = 0xf; shift = 4;
@@ -245,8 +245,8 @@ void convert (enum format_t mode, unsigned long value)
             return;
     }
 
-    char cur_shift;
-    for (cur_shift = 64-shift; cur_shift >= 0; cur_shift -= shift) {
+    char cur_shift = ((64 % shift) > 0) ? 64 - (64 % shift) : 64 - shift;
+    for (; cur_shift >= 0; cur_shift -= shift) {
         char next_val = (value >> cur_shift) & mask;
         next_val = (next_val < 10) ? next_val + '0' : next_val - 10 + 'a';
         putc(next_val, stdout);
