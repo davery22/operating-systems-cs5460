@@ -49,6 +49,7 @@ module_param(sleepy_ndevices, int, S_IRUGO);
 static unsigned int sleepy_major = 0;
 static struct sleepy_dev *sleepy_devices = NULL;
 static struct class *sleepy_class = NULL;
+static wait_queue_head_t *wqs = NULL;
 /* ================================================================ */
 
 int 
@@ -92,10 +93,9 @@ sleepy_read(struct file *filp, char __user *buf, size_t count,
 {
   struct sleepy_dev *dev = (struct sleepy_dev *)filp->private_data;
   ssize_t retval = 0;
-  int minor;
+  int minor = (int)iminor(filp->f_path.dentry->d_inode);
 
   // Print debug
-  minor = (int)iminor(filp->f_path.dentry->d_inode);
   printk("SLEEPY_READ DEVICE (%d): Process is waking everyone up. \n", minor);
 	
   // Atomically unset wait flag
@@ -104,10 +104,10 @@ sleepy_read(struct file *filp, char __user *buf, size_t count,
 	
   dev->wait_flag = 0;
 
-  mutex_unlock(&dev->sleepy_mutex);
-
   // Wake up sleeping processes
-  wake_up_interruptible(&dev->wait_queue);
+  wake_up_interruptible(wqs + minor);
+
+  mutex_unlock(&dev->sleepy_mutex);
 
   return retval;
 }
@@ -118,14 +118,14 @@ sleepy_write(struct file *filp, const char __user *buf, size_t count,
 {
   struct sleepy_dev *dev = (struct sleepy_dev *)filp->private_data;
   ssize_t retval = 0;
+  int minor = (int)iminor(filp->f_path.dentry->d_inode);
   int duration;
-  int minor;
 	
   if (count != sizeof(int)) // We assume `sizeof(int)` is 4 bytes on this platform
     return -EINVAL;
 
   if (copy_from_user(&duration, buf, count) != 0)
-    return -EINVAL; // TODO: Wrong error - want copy failed
+    return -EFAULT;
 
   if (duration > 0) {
     // Atomically set wait flag
@@ -137,11 +137,11 @@ sleepy_write(struct file *filp, const char __user *buf, size_t count,
     mutex_unlock(&dev->sleepy_mutex);
 
     // Begin waiting
-    retval = wait_event_interruptible_timeout(dev->wait_queue, dev->wait_flag == 0, duration * HZ);
+    retval = wait_event_interruptible_timeout(*(wqs + minor), dev->wait_flag == 0, duration * HZ);
+    retval = (retval + (HZ / 2)) / HZ; // Round to nearest seconds
   }
 
   // Print debug
-  minor = (int)iminor(filp->f_path.dentry->d_inode);
   printk("SLEEPY_WRITE DEVICE (%d): remaining = %zd \n", minor, retval);
 
   return retval;
@@ -174,7 +174,6 @@ sleepy_construct_device(struct sleepy_dev *dev, int minor,
   int err = 0;
   dev_t devno = MKDEV(sleepy_major, minor);
   struct device *device = NULL;
-  wait_queue_head_t wq;
     
   BUG_ON(dev == NULL || class == NULL);
 
@@ -185,8 +184,7 @@ sleepy_construct_device(struct sleepy_dev *dev, int minor,
   cdev_init(&dev->cdev, &sleepy_fops);
   dev->cdev.owner = THIS_MODULE;
 
-  init_waitqueue_head(&wq);
-  dev->wait_queue = wq;
+  init_waitqueue_head(wqs + minor);
 
   err = cdev_add(&dev->cdev, devno, 1);
   if (err)
@@ -235,6 +233,9 @@ sleepy_cleanup_module(int devices_to_destroy)
     }
     kfree(sleepy_devices);
   }
+
+  // Release wait queues
+  kfree(wqs);
     
   if (sleepy_class)
     class_destroy(sleepy_class);
@@ -284,6 +285,8 @@ sleepy_init_module(void)
     err = -ENOMEM;
     goto fail;
   }
+  
+  wqs = (wait_queue_head_t *)kzalloc(sleepy_ndevices * sizeof(wait_queue_head_t), GFP_KERNEL);
 	
   /* Construct devices */
   for (i = 0; i < sleepy_ndevices; ++i) {
@@ -293,7 +296,7 @@ sleepy_init_module(void)
       goto fail;
     }
   }
-  
+
   printk ("sleepy module loaded\n");
 
   return 0; /* success */
