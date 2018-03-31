@@ -29,6 +29,7 @@
 #include <linux/mutex.h>
 
 #include <linux/jiffies.h>
+#include <linux/sched.h>
 
 #include <asm/uaccess.h>
 
@@ -91,9 +92,9 @@ sleepy_read(struct file *filp, char __user *buf, size_t count,
 {
   struct sleepy_dev *dev = (struct sleepy_dev *)filp->private_data;
   ssize_t retval = 0;
+  int minor;
 
   // Print debug
-  int minor;
   minor = (int)iminor(filp->f_path.dentry->d_inode);
   printk("SLEEPY_READ DEVICE (%d): Process is waking everyone up. \n", minor);
 	
@@ -106,7 +107,7 @@ sleepy_read(struct file *filp, char __user *buf, size_t count,
   mutex_unlock(&dev->sleepy_mutex);
 
   // Wake up sleeping processes
-  wake_up_interruptible(&(dev->wait_queue));
+  wake_up_interruptible(&dev->wait_queue);
 
   return retval;
 }
@@ -117,13 +118,14 @@ sleepy_write(struct file *filp, const char __user *buf, size_t count,
 {
   struct sleepy_dev *dev = (struct sleepy_dev *)filp->private_data;
   ssize_t retval = 0;
+  int duration;
+  int minor;
 	
   if (count != sizeof(int)) // We assume `sizeof(int)` is 4 bytes on this platform
-    return -EINVAL
+    return -EINVAL;
 
-  int duration;
   if (copy_from_user(&duration, buf, count) != 0)
-    return -EINVAL // TODO: Wrong error - want copy failed
+    return -EINVAL; // TODO: Wrong error - want copy failed
 
   if (duration > 0) {
     // Atomically set wait flag
@@ -139,7 +141,6 @@ sleepy_write(struct file *filp, const char __user *buf, size_t count,
   }
 
   // Print debug
-  int minor;
   minor = (int)iminor(filp->f_path.dentry->d_inode);
   printk("SLEEPY_WRITE DEVICE (%d): remaining = %zd \n", minor, retval);
 
@@ -173,6 +174,7 @@ sleepy_construct_device(struct sleepy_dev *dev, int minor,
   int err = 0;
   dev_t devno = MKDEV(sleepy_major, minor);
   struct device *device = NULL;
+  wait_queue_head_t wq;
     
   BUG_ON(dev == NULL || class == NULL);
 
@@ -183,7 +185,7 @@ sleepy_construct_device(struct sleepy_dev *dev, int minor,
   cdev_init(&dev->cdev, &sleepy_fops);
   dev->cdev.owner = THIS_MODULE;
 
-  DECLARE_WAIT_QUEUE_HEAD(wq);
+  init_waitqueue_head(&wq);
   dev->wait_queue = wq;
 
   err = cdev_add(&dev->cdev, devno, 1);
