@@ -8,6 +8,8 @@
 #define SLEEPY_NDEVICES 10
 #endif
 
+#include <linux/wait.h>
+
 /* The structure to represent 'sleepy' devices. 
  *  data - data buffer;
  *  buffer_size - size of the data buffer;
@@ -19,6 +21,7 @@
 struct sleepy_dev {
   unsigned char *data;
   struct mutex sleepy_mutex; 
+  wait_queue_head_t wait_queue;
   struct cdev cdev;
 };
 #endif /* SLEEPY_H_1727_INCLUDED */

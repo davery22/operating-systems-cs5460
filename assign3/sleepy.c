@@ -28,6 +28,8 @@
 #include <linux/device.h>
 #include <linux/mutex.h>
 
+#include <linux/jiffies.h>
+
 #include <asm/uaccess.h>
 
 #include "sleepy.h"
@@ -89,15 +91,23 @@ sleepy_read(struct file *filp, char __user *buf, size_t count,
 {
   struct sleepy_dev *dev = (struct sleepy_dev *)filp->private_data;
   ssize_t retval = 0;
+
+  // Print debug
+  int minor;
+  minor = (int)iminor(filp->f_path.dentry->d_inode);
+  printk("SLEEPY_READ DEVICE (%d): Process is waking everyone up. \n", minor);
 	
+  // Atomically unset wait flag
   if (mutex_lock_killable(&dev->sleepy_mutex))
     return -EINTR;
 	
-  /* YOUR CODE HERE */
+  dev->wait_flag = 0;
 
-  /* END YOUR CODE */
-	
   mutex_unlock(&dev->sleepy_mutex);
+
+  // Wake up sleeping processes
+  wake_up_interruptible(&(dev->wait_queue));
+
   return retval;
 }
                 
@@ -108,14 +118,31 @@ sleepy_write(struct file *filp, const char __user *buf, size_t count,
   struct sleepy_dev *dev = (struct sleepy_dev *)filp->private_data;
   ssize_t retval = 0;
 	
-  if (mutex_lock_killable(&dev->sleepy_mutex))
-    return -EINTR;
-	
-  /* YOUR CODE HERE */
+  if (count != sizeof(int)) // We assume `sizeof(int)` is 4 bytes on this platform
+    return -EINVAL
 
-  /* END YOUR CODE */
-	
-  mutex_unlock(&dev->sleepy_mutex);
+  int duration;
+  if (copy_from_user(&duration, buf, count) != 0)
+    return -EINVAL // TODO: Wrong error - want copy failed
+
+  if (duration > 0) {
+    // Atomically set wait flag
+    if (mutex_lock_killable(&dev->sleepy_mutex))
+      return -EINTR;
+
+    dev->wait_flag = 1;
+
+    mutex_unlock(&dev->sleepy_mutex);
+
+    // Begin waiting
+    retval = wait_event_interruptible_timeout(dev->wait_queue, dev->wait_flag == 0, duration * HZ);
+  }
+
+  // Print debug
+  int minor;
+  minor = (int)iminor(filp->f_path.dentry->d_inode);
+  printk("SLEEPY_WRITE DEVICE (%d): remaining = %zd \n", minor, retval);
+
   return retval;
 }
 
@@ -155,7 +182,10 @@ sleepy_construct_device(struct sleepy_dev *dev, int minor,
     
   cdev_init(&dev->cdev, &sleepy_fops);
   dev->cdev.owner = THIS_MODULE;
-    
+
+  DECLARE_WAIT_QUEUE_HEAD(wq);
+  dev->wait_queue = wq;
+
   err = cdev_add(&dev->cdev, devno, 1);
   if (err)
     {
